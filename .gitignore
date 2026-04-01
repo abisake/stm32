@@ -1,0 +1,13 @@
+Debug/
+Release/
+.cproject
+.project
+.settings/
+*.launch
+*.su
+*.d
+*.o
+*.elf
+*.bin
+*.map
+*.lst
