@@ -18,8 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "usart.h"
-#include "gpio.h"
+#include "stm32f4xx.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -48,9 +47,15 @@
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
-void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
-
+/* A UART function send one msg
+*/
+void uart_putchar(char msg)
+{
+	// Poll TXE bit (bit 7 of SR) — RM0390 page 812
+	while (!(USART2->SR & (1U << 7)));
+	USART2->DR = msg; // RM0390 page 814
+}
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -65,125 +70,73 @@ void SystemClock_Config(void);
 int main(void)
 {
 
-  /* USER CODE BEGIN 1 */
+  /* USER CODE BEGIN*/
+  /* Configure the clock */
+  /* Step 1: Enable clock */
+  /* Table 1. Page 55. GPIOA pin is mapped to AHB1 bus.
+   * Page 143. Sec 6.3.10 Enable peripheral clock RCC_AHB1ENR
+   * GPIOA in 0th bit
+  */
+  RCC->AHB1ENR |= (1U << 0); // setting 0th bit
+  /* Table 1. Page 59. USART2 is mapped to APB1 bus
+   * Page 145. Sec 6.3.13 Enable peripheral clock RCC_APB1ENR
+   * USART2EN in 17th bit
+  */
+  RCC->APB1ENR |= (1U << 17); // setting 17th bit
 
-  /* USER CODE END 1 */
+  /* Step 2: Configure GPIO pins & LED2 pin
+   * a. Find the pins for USART2 in the pinout diagram, PA2, PA3
+   * b. MODER is 2 bit pin, so 2n+1:2 -> PA2=[5:4], PA3=[7:6]
+   * c. Set PA2
+  */
+  // do not set the value directly, instead clear the field you want change
+  // and set the value
+  GPIOA->MODER &= ~(0x3U << 4); // USART2_TX
+  GPIOA->MODER |= (0x2U << 4);
 
-  /* MCU Configuration--------------------------------------------------------*/
+  /* d. Set the same for PA3 which is USART_RX
+  */
+  GPIOA->MODER &= ~(0x3U << 6);
+  GPIOA->MODER |= (0x2U << 6);
 
-  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
-  HAL_Init();
+  /* e. The Green LED will be connected to PA5 (schematic file)
+   * PA5 ->[11:10]
+   */
+  GPIOA->MODER &= ~(0x3U << 10);
+  GPIOA->MODER |= (0x1U << 10);
 
-  /* USER CODE BEGIN Init */
+  /* Step 3: Select AF7 for PA2 & PA3
+   * Table 11. Page.57 Data sheet PA2=AF7=USART2_TX, PA3=AF7=USART2_RX
+   * GPIOA_AFRL page 189. Section 7.4.9 AF7=0b0111=0x7
+   * AFRLy: Alternate function selection for port x bit y (y = 0..7)
+   * PA2 [11:8] & PA3 [15:12]
+  */
+  GPIOA->AFR[0] &= ~(0xFU << 8);	// clear PA2 [11:8]
+  GPIOA->AFR[0] |= (0x7U << 8); // PA2 = AF7
+  GPIOA->AFR[0] &= ~(0xFU << 12); // clear PA3 [15:12]
+  GPIOA->AFR[0] |= (0x7U << 12); // PA3 = AF7
 
-  /* USER CODE END Init */
+  /* Step 4: Configure USART
+   * BRR page 817 Section 25.6.3: 16 MHz HSI / 115200 baud = 138 = 0x8B
+   * */
+  USART2->BRR = 0x008B;
+  /* CR1 page 815 Section 25.6.4: bit13=UE, bit3=TE, bit2=RE
+  */
+  USART2->CR1 = (1U << 3) | (1U << 2) | (1U << 13);
 
-  /* Configure the system clock */
-  SystemClock_Config();
-
-  /* USER CODE BEGIN SysInit */
-
-  /* USER CODE END SysInit */
-
-  /* Initialize all configured peripherals */
-  MX_GPIO_Init();
-  MX_USART2_UART_Init();
-  /* USER CODE BEGIN 2 */
-
-  char msg[] = "Hello world\n";
-  /* USER CODE END 2 */
-
-  /* Infinite loop */
-  /* USER CODE BEGIN WHILE */
+  /* Main loop
+   * IN BSRR page 188, bits[15:0] for set, bits[31:16] for clear
+   */
   while (1)
   {
-    /* USER CODE END WHILE */
-	  HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);
-	  HAL_Delay(500);
-	  HAL_UART_Transmit(&huart2, (uint8_t*)msg, sizeof(msg)-1,HAL_MAX_DELAY);
-    /* USER CODE BEGIN 3 */
-  }
-  /* USER CODE END 3 */
-}
+	  GPIOA->BSRR = (1U << 5); // LED is ON
+	  uart_putchar('1');
+	  // volatile -> prevents compiler optimization, different from ATOMIC
+	  for(volatile uint32_t i =0; i < 500000 ; i++);// milliseconds
 
-/**
-  * @brief System Clock Configuration
-  * @retval None
-  */
-void SystemClock_Config(void)
-{
-  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
-  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
-
-  /** Configure the main internal regulator output voltage
-  */
-  __HAL_RCC_PWR_CLK_ENABLE();
-  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE3);
-
-  /** Initializes the RCC Oscillators according to the specified parameters
-  * in the RCC_OscInitTypeDef structure.
-  */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
-  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
-  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
-  RCC_OscInitStruct.PLL.PLLM = 16;
-  RCC_OscInitStruct.PLL.PLLN = 336;
-  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV4;
-  RCC_OscInitStruct.PLL.PLLQ = 2;
-  RCC_OscInitStruct.PLL.PLLR = 2;
-  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  /** Initializes the CPU, AHB and APB buses clocks
-  */
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
-                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
-  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
-  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
-
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
-  {
-    Error_Handler();
+	  GPIOA->BSRR = (1U << (5+16)); // LED is OFF
+	  uart_putchar('0');
+	  for(volatile uint32_t i =0; i < 500000 ; i++); // milliseconds
   }
 }
-
-/* USER CODE BEGIN 4 */
-
-/* USER CODE END 4 */
-
-/**
-  * @brief  This function is executed in case of error occurrence.
-  * @retval None
-  */
-void Error_Handler(void)
-{
-  /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
-  __disable_irq();
-  while (1)
-  {
-  }
-  /* USER CODE END Error_Handler_Debug */
-}
-#ifdef USE_FULL_ASSERT
-/**
-  * @brief  Reports the name of the source file and the source line number
-  *         where the assert_param error has occurred.
-  * @param  file: pointer to the source file name
-  * @param  line: assert_param error line source number
-  * @retval None
-  */
-void assert_failed(uint8_t *file, uint32_t line)
-{
-  /* USER CODE BEGIN 6 */
-  /* User can add his own implementation to report the file name and line number,
-     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
-  /* USER CODE END 6 */
-}
-#endif /* USE_FULL_ASSERT */
+/* USER CODE END*/
