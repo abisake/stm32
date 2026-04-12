@@ -1,105 +1,108 @@
 #include "uart.h"
 
-// define the ring buffer
-#define RX_BUF_SIZE 64U
-#define RX_BUF_MASK (RX_BUF_SIZE - 1U)
-
+#define RX_BUF_SIZE  64U
+#define RX_BUF_MASK  (RX_BUF_SIZE - 1U)
 static volatile char rx_buffer[RX_BUF_SIZE];
-static volatile uint8_t rx_write = 0; 	// only written by ISR, that is why it is volatile
-static uint8_t rx_read = 0;				// only written by main loop, so need for volatile
-/* rx_write is volatile (ISR writes it, main reads it)
- * rx_read is NOT volatile (only main touches it)
- * */
+static volatile uint8_t rx_write = 0;
+static uint8_t rx_read  = 0;
 
-// Configure UART
+static volatile bool dma_tx_busy = false;
+
+// For debugging in live expressions
+volatile uint32_t usart2_isr_count = 0;
+volatile uint32_t dma_isr_count = 0;
+// Unablr to see the values, need to investigate
+
+// uart init
 void uart_init(void)
 {
-	// ENable clocks
-	RCC->AHB1ENR |= (1U << 0);		// GPIOA, P.143
-	RCC->APB1ENR |= (1U << 17);		// USART2, P.145
+    RCC->AHB1ENR |= (1U << 0);   // GPIOA clock (page 143)
+    RCC->APB1ENR |= (1U << 17);  // USART2 clock (page 145)
 
-	// Alternate functions PA2, PA3 -> P.185
-	GPIOA->MODER &= ~(0x3U << 4);
-	GPIOA->MODER |= (0x2U << 4);
+    GPIOA->MODER &= ~(0x3U << 4);
+    GPIOA->MODER |= (0x2U << 4);  // PA2 AF
 
-	GPIOA->MODER &= ~(0x3U << 6);
-	GPIOA->MODER |= (0x2U << 6);
+    GPIOA->MODER &= ~(0x3U << 6);
+    GPIOA->MODER |= (0x2U << 6);  // PA3 AF
 
-	// OSPEEDR: high speed foe TX -> P.186
-	GPIOA->OSPEEDR |= (0x3U << 4);
+    GPIOA->AFR[0] &= ~(0xFU << 8);
+    GPIOA->AFR[0] |= (0x7U << 8);  // PA2=AF7
 
-	// Configure AF7, (afrl -> P.187, table 11 datasheet)
-	GPIOA->AFR[0] &= ~(0xFU << 8);
-	GPIOA->AFR[0] |= (0x7U << 8);
-	GPIOA->AFR[0] &= ~(0xFU << 12);
-	GPIOA->AFR[0] |= (0x7U << 12);
+    GPIOA->AFR[0] &= ~(0xFU << 12);
+    GPIOA->AFR[0] |= (0x7U << 12); // PA3=AF7
 
-	// BRR: at 16 MHz HSI, 115200 baud (p.817)
-	USART2->BRR = 0x008B;
+    USART2->BRR = 0x008B;  // 115200 at 16 MHz HSI
+    USART2->CR1 = (1U<<5)|(1U<<3)|(1U<<2)|(1U<<13); // RXNEIE|TE|RE|UE
 
-	// Enable the Read Data Register Not Empty(RXNE) interrupt in USART2's Control Register
-	USART2->CR1 = (1U << 5)		// RXNE interrupt enable
-			| (1U << 3)			// enable TX -> TE
-			| (1U << 2)			// enable RX -> RE
-			| (1U << 13);		// enable USART
-
-	// Enable USARt2 Interupt in NVIC (Nested Vector Interrupt COntrolled)
-	// Need to study about NVIC -> Page 235, Table 38
-	NVIC_EnableIRQ(USART2_IRQn);
-	NVIC_SetPriority(USART2_IRQn, 1);
-
+    NVIC_EnableIRQ(USART2_IRQn);
+    NVIC_SetPriority(USART2_IRQn, 1);
 }
 
-// an ISR function which will be called automatically by hardware
+void uart_dma_init(void)
+{
+	//Enable DMA1 clock (AHB! bus -> DMA1EN, 21 bit) P.143
+	RCC->AHB1ENR |= (1U << 21);
+
+	// Enable USART2 DMA TX (USART COntrol Register
+	USART2->CR3 |= (1U << 7);
+
+	// Enable DMA1 Stream6 (Table 28)
+	NVIC_EnableIRQ(DMA1_Stream6_IRQn);
+	NVIC_SetPriority(DMA1_Stream6_IRQn, 2); // lower priority than UART RX
+}
+
+void uart_dma_send(const uint8_t *buf, uint16_t len)
+{
+	if (dma_tx_busy) return; // previous transfer is on-going
+
+	dma_tx_busy=true;
+
+	// Configure DMA1 Stream 6
+	DMA1_Stream6->CR = 0; // initially disable the stream
+	while(DMA1_Stream6->CR & 1); // check EN bit is cleared or not
+
+	DMA1->HIFCR = 0x3FU << 16;	// Clear HICFR bits[21:16], Section 9.5.4, P.224
+
+	DMA1_Stream6->PAR = (uint32_t)&USART2->DR;	// peripheral address register
+	DMA1_Stream6->M0AR = (uint32_t)buf;			// memory 0 address register
+	DMA1_Stream6->NDTR = len;					// number of data items to transfer register
+
+	DMA1_Stream6->CR =
+			(4U << 25) |   // CHSEL bits[27:25] = 4 → Channel 4 = USART2_TX (Table 28)
+			(1U << 16) |   // TCIE: transfer complete interrupt enable
+			(0U << 13) |   // MSIZE = 00: memory data size = byte
+			(0U << 11) |   // PSIZE = 00: peripheral data size = byte
+			(1U << 10) |   // MINC = 1: increment memory address each transfer
+			(0U << 9)  |   // PINC = 0: don't increment peripheral address (always DR)
+			(1U << 6)  |   // DIR = 01: memory-to-peripheral direction
+			(1U << 0);     // EN: enable stream — starts transfer immediately
+}
+
+// ISR: fires when all bytes have been transferred
+void DMA1_Stream6_IRQHandler(void)
+{
+	dma_isr_count++;
+	if(DMA1->HISR & (1U << 21))   // TC1F6: stream6's flag to check transfer is complete or not
+	{
+		DMA1->HIFCR = (1U << 21);	// clear the flag
+		dma_tx_busy = false;
+	}
+}
+
 void USART2_IRQHandler(void)
 {
-	// Check RXNE flag, in bit 5 -> P. 814
+	usart2_isr_count++;
 	if(USART2->SR & (1U << 5))
 	{
-		char byte = (char)USART2->DR;
-		/* An interrupt is generated if RXNEIE=1 in the USART_CR1
-register. It is cleared by a read to the USART_DR register */
-
+		char ch = (char)USART2->DR;
 		uint8_t next_write = (rx_write + 1U) & RX_BUF_MASK;
-		// check buffer
 		if (next_write != rx_read)
 		{
-			rx_buffer[rx_write] = byte;
+			rx_buffer[rx_write] = ch;
 			rx_write = next_write;
 		}
 	}
 }
-
-// simple polling TX,
-void uart_putchar(char c)
-{
-	//	USART2 Status Register P.814
-	while(!(USART2->SR & (1U << 7)));
-	USART2->DR = (uint8_t)c;
-}
-
-void uart_puts(const char *s)
-{
-	while (*s) uart_putchar(*s++);
-}
-
-// read from buffer
-bool uart_rx_available(void)
-{
-	// if pointers differs, data is present
-	return rx_read != rx_write;
-}
-
-char uart_rx_read(void)
-{
-	if (!uart_rx_available()) return 0;
-
-	char c = rx_buffer[rx_read];
-	rx_read = (rx_read +1U) & RX_BUF_MASK;
-
-	return c;
-}
-
 
 
 

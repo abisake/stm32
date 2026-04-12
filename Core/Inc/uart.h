@@ -6,7 +6,5 @@
 #include <stdbool.h>
 
 void uart_init(void);
-void uart_putchar(char ch);
-void uart_puts(const char *str);
-bool uart_rx_available(void);
-char uart_rx_read(void);
+void uart_dma_init(void);
+void uart_dma_send(const uint8_t *buf, uint16_t len);

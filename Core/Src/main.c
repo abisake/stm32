@@ -23,16 +23,10 @@
 int main(void)
 {
 	uart_init();
-	uart_puts("Ready......\r\n");
+	uart_dma_init();
+	const uint8_t msg[] = "Hello from DMA!\r\n";
+	uart_dma_send(msg, sizeof(msg) - 1);
 
-	while(1)
-	{
-		if(uart_rx_available())
-		{
-			// echo back whatever you type
-			char msg = uart_rx_read();
-			uart_putchar(msg);
-		}
-	}
+	while(1){}
 }
 
